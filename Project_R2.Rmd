@@ -1,0 +1,249 @@
+---
+title: "Project First Submission"
+# author: "Ao (Alan) Huang"
+date: "2024-03-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 0
+
+Import and clean the data set; select useful cols for prediction for now; fill in missing values in some cols if the `missing' contains useful information for prediction; then drop obs with missing values
+
+```{r warning=FALSE}
+rm(list = ls())
+set.seed(1)
+library(caret)
+library(tree)
+library(e1071) # For svm (probit models)
+library(boot) # For cross-validation
+library(class) # For KNN
+library(MASS)
+library(tidyverse)
+
+yelp_df <- read_csv('./Datasets/yelp_business.csv', show_col_types = FALSE) %>%
+  dplyr::select(stars, review_count, is_open,
+         ByAppointmentOnly, BusinessAcceptsCreditCards, BikeParking, WiFi, HasTV) %>%
+  mutate(across(c(ByAppointmentOnly, BusinessAcceptsCreditCards, BikeParking, WiFi, HasTV), ~ as.character(.))) %>%
+  # mutate(across(c(ByAppointmentOnly, BusinessAcceptsCreditCards, BikeParking, WiFi, HasTV), ~ na_if(., ''))) %>%
+  mutate(across(c(ByAppointmentOnly, BusinessAcceptsCreditCards, BikeParking, WiFi, HasTV), ~ replace_na(., 'nan'))) %>%
+  drop_na() %>%
+  mutate(across(c(ByAppointmentOnly, BusinessAcceptsCreditCards, BikeParking, WiFi, HasTV), as.factor),
+         is_open = as.factor(is_open) ) %>% 
+  slice_sample(prop = 1/10)
+```
+
+##
+
+Check the data set
+
+```{r}
+str(yelp_df)
+summary(yelp_df)
+```
+
+
+## 1
+
+Predict if a business is still open or not (Survive or not) without any cross validation
+
+```{r warning=FALSE}
+set.seed(1)
+training_index <- createDataPartition(yelp_df$is_open, p = 0.8, list = FALSE)
+train_data <- yelp_df[training_index, ]
+test_data <- yelp_df[-training_index, ]
+evaluate_model <- function(model, test_data) {
+  model_class <- class(model)[1]
+  if (model_class == "tree") {
+    predictions <- predict(model, newdata = test_data, type = "class")
+  } else if (model_class == "svm") {
+    predictions <- predict(model, newdata = test_data)
+  } else {
+    probabilities <- predict(model, newdata = test_data, type = "response")
+    predictions <- ifelse(probabilities > 0.5, "1", "0")  # Ensure output is character to match factor levels
+  }
+  
+  # Ensure predictions are factor with levels matching the actual outcomes
+  unique_levels <- union(levels(factor(predictions)), levels(test_data$is_open))
+  predictions_factor <- factor(predictions, levels = unique_levels)
+  actual_outcomes_factor <- factor(test_data$is_open, levels = unique_levels)
+  
+  confusion <- confusionMatrix(predictions_factor, actual_outcomes_factor)
+  cat("Accuracy:", confusion$overall['Accuracy'], "\n\n")
+}
+
+## basic models
+model_logistic <- glm(is_open ~ . , data = train_data, family = binomial())
+cat("Logistic Model:\n")
+evaluate_model(model_logistic, test_data)
+
+model_probit <- glm(is_open ~ . , data = train_data, family = binomial(link = "probit"))
+cat("Probit Model:\n")
+evaluate_model(model_probit, test_data)
+
+## add quadratic terms
+model_logistic_quad <- glm(is_open ~ . + poly(stars, 2)+ poly(review_count, 2), data = train_data, family = binomial())
+cat("Logistic Model with Quadratic Terms:\n")
+evaluate_model(model_logistic_quad, test_data)
+
+model_probit_quad <- glm(is_open ~ . + poly(stars, 2)+ poly(review_count, 2), data = train_data, family = binomial(link = "probit"))
+cat("Probit Model with Quadratic Terms:\n")
+evaluate_model(model_probit_quad, test_data)
+
+## add interaction terms
+model_logistic_int <- glm(is_open ~ . + stars:review_count, data = train_data, family = binomial())
+cat("Logistic Model with Interaction Terms:\n")
+evaluate_model(model_logistic_int, test_data)
+
+model_probit_int <- glm(is_open ~ . + stars:review_count, data = train_data, family = binomial(link = "probit"))
+cat("Probit Model with Interaction Terms:\n")
+evaluate_model(model_probit_int, test_data)
+
+# Decision Tree Model
+model_tree <- tree(is_open ~ ., data = train_data)
+cat("Decision Tree Model:\n")
+evaluate_model(model_tree, test_data)
+
+# SVM Model with Linear Kernel
+model_svm_linear <- svm(is_open ~ ., data = train_data, kernel = "linear", cost = 1, scale = FALSE)
+predictions_linear <- predict(model_svm_linear, newdata = test_data)
+confusion_linear <- confusionMatrix(factor(predictions_linear), factor(test_data$is_open))
+cat("SVM Model with Linear Kernel:\n")
+cat("Accuracy:", confusion_linear$overall['Accuracy'], "\n\n")
+
+# SVM Model with Radial Basis Kernel
+model_svm_rbf <- svm(is_open ~ ., data = train_data, kernel = "radial", gamma = 1, cost = 1)
+predictions_rbf <- predict(model_svm_rbf, newdata = test_data)
+confusion_rbf <- confusionMatrix(factor(predictions_rbf), factor(test_data$is_open))
+cat("SVM Model with Radial Basis Kernel:\n")
+cat("Accuracy:", confusion_rbf$overall['Accuracy'], "\n\n")
+
+# LDA Model
+model_lda <- lda(is_open ~ ., data = train_data)
+lda_pred <- predict(model_lda, newdata = test_data)$class
+cat("LDA Model:\n")
+confusion_lda <- confusionMatrix(factor(lda_pred), factor(test_data$is_open))
+cat("Accuracy:", confusion_lda$overall['Accuracy'], "\n\n")
+
+# QDA Model
+model_qda <- qda(is_open ~ ., data = train_data)
+qda_pred <- predict(model_qda, newdata = test_data)$class
+cat("QDA Model:\n")
+confusion_qda <- confusionMatrix(factor(qda_pred), factor(test_data$is_open))
+cat("Accuracy:", confusion_qda$overall['Accuracy'], "\n\n")
+
+```
+
+
+## 3
+
+Use 5-fold cross-validation to test the glm models and . How do the models perform?
+
+```{r warning=FALSE}
+cv_model_accuracy <- function(data, formula, model_type, additional_args = list()) {
+  set.seed(1)
+  folds <- createFolds(data$is_open, k = 5, list = TRUE)
+  accuracies <- numeric(length(folds))
+  
+  for(i in seq_along(folds)) {
+    train_indices <- unlist(folds[-i])
+    test_indices <- unlist(folds[i])
+    
+    train_data <- data[train_indices, ]
+    test_data <- data[test_indices, ]
+    
+    # Model fitting
+    if(model_type == "logistic") {
+      model <- glm(formula, data = train_data, family = binomial())
+    } else if(model_type == "probit") {
+      model <- glm(formula, data = train_data, family = binomial(link = "probit"))
+    } else if(model_type == "tree") {
+      model <- tree(formula, data = train_data)
+    } else if(model_type == "svm") {
+      model <- do.call("svm", c(list(formula = formula, data = train_data, probability = TRUE), additional_args))
+    } else if(model_type == "lda") {
+      model <- lda(formula, data = train_data)
+    } else if(model_type == "qda") {
+      model <- qda(formula, data = train_data)
+    } else {
+      stop("Unsupported model type")
+    }
+    
+    # Predictions and accuracy calculation
+    if(model_type %in% c("logistic", "probit")) {
+      probabilities <- predict(model, newdata = test_data, type = "response")
+      predictions <- ifelse(probabilities > 0.5, 1, 0)
+    } else if(model_type == "tree") {
+      predictions <- as.numeric(as.character(predict(model, newdata = test_data, type = "class")))
+    } else if(model_type == "svm") {
+      predictions <- as.numeric(as.character(predict(model, newdata = test_data)))
+    } else {
+      pred <- predict(model, newdata = test_data)
+      predictions <- as.numeric(as.character(pred$class))
+    }
+    
+    accuracies[i] <- sum(predictions == test_data$is_open) / length(test_data$is_open)
+  }
+  
+  mean_accuracy <- mean(accuracies)
+  return(mean_accuracy)
+}
+
+formula <- is_open ~ .
+mean_accuracy_logistic <- cv_model_accuracy(yelp_df, formula, model_type = "logistic")
+cat("Mean Accuracy for Logistic Model:", mean_accuracy_logistic, "\n")
+
+formula <- is_open ~ .
+mean_accuracy_probit <- cv_model_accuracy(yelp_df, formula, model_type = "probit")
+cat("Mean Accuracy for Probit Model:", mean_accuracy_probit, "\n")
+
+formula_logistic_quad <- is_open ~ . + poly(stars, 2) + poly(review_count, 2)
+mean_accuracy_logistic_quad <- cv_model_accuracy(yelp_df, formula_logistic_quad, "logistic")
+cat("Mean Accuracy for Logistic Model with Quadratic Terms:", mean_accuracy_logistic_quad, "\n")
+
+formula_probit_quad <- is_open ~ . + poly(stars, 2) + poly(review_count, 2)
+mean_accuracy_probit_quad <- cv_model_accuracy(yelp_df, formula_probit_quad, "probit")
+cat("Mean Accuracy for Probit Model with Quadratic Terms:", mean_accuracy_probit_quad, "\n")
+
+formula_logistic_int <- is_open ~ . + stars:review_count
+mean_accuracy_logistic_int <- cv_model_accuracy(yelp_df, formula_logistic_int, "logistic")
+cat("Mean Accuracy for Logistic Model with Interaction Terms:", mean_accuracy_logistic_int, "\n")
+
+formula_probit_int <- is_open ~ . + stars:review_count
+mean_accuracy_probit_int <- cv_model_accuracy(yelp_df, formula_probit_int, "probit")
+cat("Mean Accuracy for Probit Model with Interaction Terms:", mean_accuracy_probit_int, "\n")
+
+formula_tree <- is_open ~ .
+mean_accuracy_tree <- cv_model_accuracy(yelp_df, formula_tree, "tree")
+cat("Mean Accuracy for Decision Tree Model:", mean_accuracy_tree, "\n")
+
+formula_svm_linear <- is_open ~ .
+mean_accuracy_svm_linear <- cv_model_accuracy(yelp_df, formula_svm_linear, "svm", list(kernel = "linear", cost = 1))
+cat("Mean Accuracy for SVM Model with Linear Kernel:", mean_accuracy_svm_linear, "\n")
+
+formula_svm_rbf <- is_open ~ .
+mean_accuracy_svm_rbf <- cv_model_accuracy(yelp_df, formula_svm_linear, "svm", list(kernel = "radial", gamma = 1, cost = 1))
+cat("Mean Accuracy for SVM Model with Radial Basis Kernel:", mean_accuracy_svm_rbf, "\n")
+
+formula_lda <- is_open ~ .
+mean_accuracy_lda <- cv_model_accuracy(yelp_df, formula_lda, "lda")
+cat("Mean Accuracy for LDA Model:", mean_accuracy_lda, "\n")
+
+formula_qda <- is_open ~ .
+mean_accuracy_qda <- cv_model_accuracy(yelp_df, formula_qda, "qda")
+cat("Mean Accuracy for QDA Model:", mean_accuracy_qda, "\n")
+
+
+```
+
+## 4
+
+Compare and comment on the error obtained with each validation approach for each
+model.
+
+After 5-fold cross validation, the best performance model is Logistic Model with Quadratic Terms
+
+<!-- ### The codes are also publicly available at <https://rpubs.com/AlanHuang/CSC642-R_Assignment3> -->
